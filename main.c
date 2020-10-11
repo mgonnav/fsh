@@ -14,11 +14,22 @@
 #define WRITE_END 1
 
 int fdin, fdout;
+char history[MAX_LINE_WIDTH] = "";
+int redirection, redirection_pos;
+int pipe_pos;
+bool should_wait;
+
+bool HistoryCommand(char*);
+bool StrEq(char*, char*);
+void ParseLineToArgs(char*, char**);
+void OpenRedirectionDescriptorIfSpecified(char**);
+void CopyPipedCommand(char** args1, char** args2);
 
 int main() {
   bool should_run = true;
-  char *args[MAX_ARGS];
-  char history[MAX_LINE_WIDTH] = "";
+  char* args[MAX_ARGS];
+  fdin = dup(STDIN_FILENO);
+  fdout = dup(STDOUT_FILENO);
 
   while (should_run) {
     printf("fsh>");
@@ -26,72 +37,30 @@ int main() {
 
     char line[MAX_LINE_WIDTH];
     scanf("%[^\n]s", line);
-    if (strcmp(line, "!!") == 0) {
-      if (!*history) {
-        printf("No commands in history.\n");
-        while ((getchar()) != '\n')
-          ;
-        continue;
-      } else {
-        strcpy(line, history);
-      }
-    }
-
     while ((getchar()) != '\n')
       ;
 
-    strcpy(history, line);
-
-    int j = 0;
-    args[j] = strtok(line, " ");
-    int redirection_pos;
-    int redirection = 0;
-    int pipe_pos = -1;
-    while (args[j] != NULL) {
-      args[++j] = strtok(NULL, " ");
-      if (strcmp(args[j - 1], "<") == 0) {
-        fdin = dup(STDIN_FILENO);
-        redirection = 1;
-        redirection_pos = j - 1;
-      } else if (strcmp(args[j - 1], ">") == 0) {
-        fdout = dup(STDOUT_FILENO);
-        redirection = 2;
-        redirection_pos = j - 1;
-      } else if (strcmp(args[j - 1], "|") == 0) {
-        args[j - 1] = NULL;
-        pipe_pos = j - 1;
+    if (HistoryCommand(line)) {
+      if (*history) {
+        strcpy(line, history);
+      } else {
+        printf("No commands in history.\n");
+        continue;
+        continue;
       }
     }
 
-    if (strcmp(args[0], "exit") == 0) break;
+    redirection = -1;
+    pipe_pos = -1;
+    should_wait = true;
+    ParseLineToArgs(line, args);
 
-    int file_desc;
-    int saved_desc;
-    if (redirection == 1) {
-      saved_desc = dup(STDIN_FILENO);
-      file_desc = open(args[redirection_pos + 1], O_RDONLY);
-      dup2(file_desc, redirection - 1);
-    } else if (redirection == 2) {
-      saved_desc = dup(STDOUT_FILENO);
-      args[redirection_pos] = NULL;
-      file_desc = open(args[redirection_pos + 1], O_WRONLY | O_CREAT | O_TRUNC, S_IRWXU | S_IRWXG);
-      dup2(file_desc, redirection - 1);
-    }
+    if (StrEq(args[0], "exit")) break;
 
-    bool should_wait = true;
-    if (strcmp(args[j - 1], "&") == 0) {
-      should_wait = false;
-      args[j - 1] = NULL;
-    }
+    OpenRedirectionDescriptorIfSpecified(args);
 
-    char *args2[MAX_ARGS];
-    if (pipe_pos != -1)
-    {
-      int i;
-      for (i = pipe_pos+1; args[i] != NULL; ++i)
-        args2[i-pipe_pos-1] = args[i];
-      args2[i-pipe_pos-1] = NULL;
-    }
+    char* args2[MAX_ARGS];
+    CopyPipedCommand(args, args2);
 
     int fd[2];
     pid_t pid = fork();
@@ -99,12 +68,6 @@ int main() {
       printf("ERROR: Couldn't fork.\n");
       exit(0);
     } else if (pid == 0) {
-      if (redirection == 1) {
-        args[redirection_pos] = NULL;
-        read(STDIN_FILENO, args[redirection_pos], 200);
-        args[redirection_pos + 1] = NULL;
-      }
-
       if (pipe_pos != -1) {
         pipe(fd);
 
@@ -123,7 +86,6 @@ int main() {
         }
       } else {
         execvp(args[0], args);
-        exit(0);
       }
     } else {
       if (should_wait) wait(NULL);
@@ -134,4 +96,59 @@ int main() {
   }
 
   return 0;
+}
+
+bool HistoryCommand(char* line) { return StrEq(line, "!!"); }
+
+bool StrEq(char* s1, char* s2) { return strcmp(s1, s2) == 0; }
+
+void ParseLineToArgs(char* line, char** args) {
+  int j = 0;
+  args[j] = strtok(line, " ");
+  redirection = -1;
+  pipe_pos = -1;
+  while (args[j] != NULL) {
+    args[++j] = strtok(NULL, " ");
+    if (StrEq(args[j - 1], "<")) {
+      args[j - 1] = NULL;
+      fdin = dup(STDIN_FILENO);
+      redirection = 0;
+      redirection_pos = j - 1;
+    } else if (StrEq(args[j - 1], ">")) {
+      args[j - 1] = NULL;
+      fdout = dup(STDOUT_FILENO);
+      redirection = 1;
+      redirection_pos = j - 1;
+    } else if (StrEq(args[j - 1], "|")) {
+      args[j - 1] = NULL;
+      pipe_pos = j - 1;
+    }
+  }
+
+  if (StrEq(args[j - 1], "&")) {
+    should_wait = false;
+    args[j - 1] = NULL;
+  }
+}
+
+void OpenRedirectionDescriptorIfSpecified(char** args) {
+  int file_desc;
+  if (redirection == 0) {
+    file_desc = open(args[redirection_pos + 1], O_RDONLY);
+    dup2(file_desc, STDIN_FILENO);
+  } else if (redirection == 1) {
+    args[redirection_pos] = NULL;
+    file_desc = open(args[redirection_pos + 1], O_WRONLY | O_CREAT | O_TRUNC,
+                     S_IRWXU | S_IRWXG);
+    dup2(file_desc, STDOUT_FILENO);
+  }
+}
+
+void CopyPipedCommand(char** args1, char** args2) {
+  if (pipe_pos != -1) {
+    int i;
+    for (i = pipe_pos + 1; args1[i] != NULL; ++i)
+      args2[i - pipe_pos - 1] = args1[i];
+    args2[i - pipe_pos - 1] = NULL;
+  }
 }
