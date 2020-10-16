@@ -1,3 +1,22 @@
+/*
+ * gcc -o fsh main.c
+ * 
+ * Info:
+ * 1. Redirection (<, >) and pipe(|) implemented. Cannot use more than one of
+ *    them at the time. Using more than one of them will result in unexpected
+ *    behaviour, since there's no exception handling.
+ *
+ * Custom commands:
+ * 1. history: Prints the command history up to 10 last commands.
+ * 2. !!: Reruns the last command.
+ * 3. !#: Where # is a number between 0-9. This will run the command in
+ *        position # in the history.
+ * 4. pause _pid_: Sends a SIGSTOP signal to a process with ID _pid_.
+ * 5. continue _pid_: Send a SIGCONT signal to a process with ID _pid_.
+ *
+ * Any other command that runs in bash should work fine.
+ *
+*/
 #include <fcntl.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -14,16 +33,21 @@
 #define WRITE_END 1
 
 int fdin, fdout;
-char history[MAX_LINE_WIDTH] = "";
+char history[11][MAX_LINE_WIDTH];
+int historyCmdCount = 0;
 int redirection, redirection_pos;
 int pipe_pos;
 bool should_wait;
 
-bool HistoryCommand(char*);
+void PushToHistory(char*);
+bool ParseHistoryCommand(char*);
 bool StrEq(char*, char*);
 void ParseLineToArgs(char*, char**);
 void OpenRedirectionDescriptorIfSpecified(char**);
-void CopyPipedCommand(char** args1, char** args2);
+void PrintHistory();
+void CopyPipedCommand(char**, char**);
+void Pause(char*);
+void Continue(char*);
 
 int main() {
   bool should_run = true;
@@ -40,15 +64,17 @@ int main() {
     while ((getchar()) != '\n')
       ;
 
-    if (HistoryCommand(line)) {
-      if (*history) {
-        strcpy(line, history);
-      } else {
-        printf("No commands in history.\n");
-        continue;
-        continue;
-      }
+    if (line[0] == '!') {
+      bool parsed = ParseHistoryCommand(line);
+      if (!parsed) continue;
     }
+
+    if (StrEq(args[0], "history")) {
+      PrintHistory();
+      continue;
+    }
+
+    PushToHistory(line);
 
     redirection = -1;
     pipe_pos = -1;
@@ -56,6 +82,14 @@ int main() {
     ParseLineToArgs(line, args);
 
     if (StrEq(args[0], "exit")) break;
+    if (StrEq(args[0], "pause") && args[1]) {
+      Pause(args[1]);
+      continue;
+    }
+    if (StrEq(args[0], "continue") && args[1]) {
+      Continue(args[1]);
+      continue;
+    }
 
     OpenRedirectionDescriptorIfSpecified(args);
 
@@ -98,7 +132,31 @@ int main() {
   return 0;
 }
 
-bool HistoryCommand(char* line) { return StrEq(line, "!!"); }
+bool ParseHistoryCommand(char* line) {
+  if (line[1] == '!') line[1] = '0';
+
+  if (line[1] >= '0' && line[1] <= '9') {
+    int pos = line[1] - '0';
+    if (!*history[pos]) {
+      printf("No command number %d in history.\n", pos);
+      return 0;
+    }
+
+    strcpy(line, history[pos]);
+    return 1;
+  } else {
+    printf("Unknown command.\n");
+    return 0;
+  }
+}
+
+void PushToHistory(char* line) {
+  for (int i = historyCmdCount - 1; i >= 0; --i)
+    strcpy(history[i + 1], history[i]);
+  strcpy(history[0], line);
+
+  if (historyCmdCount < 10) ++historyCmdCount;
+}
 
 bool StrEq(char* s1, char* s2) { return strcmp(s1, s2) == 0; }
 
@@ -131,6 +189,11 @@ void ParseLineToArgs(char* line, char** args) {
   }
 }
 
+void PrintHistory() {
+  for (int i = historyCmdCount - 1; i >= 0; --i)
+    printf("%d: %s\n", i, history[i]);
+}
+
 void OpenRedirectionDescriptorIfSpecified(char** args) {
   int file_desc;
   if (redirection == 0) {
@@ -152,3 +215,7 @@ void CopyPipedCommand(char** args1, char** args2) {
     args2[i - pipe_pos - 1] = NULL;
   }
 }
+
+void Pause(char* pid) { kill(atoi(pid), 19); }
+
+void Continue(char* pid) { kill(atoi(pid), 18); }
